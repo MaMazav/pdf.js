@@ -140,8 +140,22 @@ var JpxImage = (function JpxImageClosure() {
       }
       throw new Error('JPX Error: No size marker found in JPX stream');
     },
-    parseCodestream: function JpxImage_parseCodestream(data, start, end) {
+    parseCodestream: function JpxImage_parseCodestream(
+      data, start, end, regionToParse) {
       var context = {};
+      
+      if (regionToParse !== undefined) {
+        if (regionToParse.left === undefined ||
+            regionToParse.top === undefined ||
+            regionToParse.right === undefined ||
+            regionToParse.bottom === undefined) {
+          throw new Error('JPX Error: Either left, top, right or ' +
+            'bottom are undefined in regionToParse');
+        }
+        
+        context.regionToParse = regionToParse;
+      }
+      
       try {
         var doNotRecover = false;
         var position = start;
@@ -170,6 +184,7 @@ var JpxImage = (function JpxImageClosure() {
               var componentsCount = readUint16(data, position + 36);
               siz.Csiz = componentsCount;
               var components = [];
+              var isComponentSizesSupported = true;
               j = position + 38;
               for (var i = 0; i < componentsCount; i++) {
                 var component = {
@@ -180,12 +195,22 @@ var JpxImage = (function JpxImageClosure() {
                 };
                 calculateComponentDimensions(component, siz);
                 components.push(component);
+                
+                if (regionToParse !== undefined) {
+                  isComponentSizesSupported &=
+                    component.XRsiz === 1 && component.YRsiz === 1;
+                }
               }
               context.SIZ = siz;
               context.components = components;
               calculateTileGrids(context, components);
               context.QCC = [];
               context.COC = [];
+              
+              if (!isComponentSizesSupported) {
+                throw new Error('JPX Error: When regionToParse is used, ' +
+                  'component size other than 1 is not supported');
+              }
               break;
             case 0xFF55: // Tile-part lengths, main header (TLM)
               var Ltlm = readUint16(data, position); // Marker segment length
@@ -1199,14 +1224,28 @@ var JpxImage = (function JpxImageClosure() {
     }
     return position;
   }
-  function copyCoefficients(coefficients, levelWidth, levelHeight, subband,
-                            delta, mb, reversible, segmentationSymbolUsed) {
+  function copyCoefficients(coefficients, targetArrayWidth, targetArrayHeight,
+                            subband,delta, mb, reversible,
+                            segmentationSymbolUsed, regionInLevel) {
     var x0 = subband.tbx0;
     var y0 = subband.tby0;
-    var width = subband.tbx1 - subband.tbx0;
     var codeblocks = subband.codeblocks;
     var right = subband.type.charAt(0) === 'H' ? 1 : 0;
-    var bottom = subband.type.charAt(1) === 'H' ? levelWidth : 0;
+    var bottom = subband.type.charAt(1) === 'H' ? targetArrayWidth : 0;
+    var resolution = subband.resolution;
+    var interleave = (subband.type !== 'LL');
+    var regionInSubband;
+    if (!interleave) {
+      regionInSubband = regionInLevel;
+    } else {
+      regionInSubband = {
+        x0: (regionInLevel.x0 - resolution.trx0) / 2 + subband.tbx0,
+        y0: (regionInLevel.y0 - resolution.try0) / 2 + subband.tby0,
+        x1: (regionInLevel.x1 - resolution.trx0) / 2 + subband.tbx0,
+        y1: (regionInLevel.y1 - resolution.try0) / 2 + subband.tby0
+      };
+    }
+    var targetArrayStep = interleave ? 2 : 1;
 
     for (var i = 0, ii = codeblocks.length; i < ii; ++i) {
       var codeblock = codeblocks[i];
@@ -1216,6 +1255,17 @@ var JpxImage = (function JpxImageClosure() {
         continue;
       }
       if (codeblock['data'] === undefined) {
+        continue;
+      }
+      
+      var regionInCodeblock = {
+        x0: Math.max(codeblock.tbx0_, regionInSubband.x0),
+        y0: Math.max(codeblock.tby0_, regionInSubband.y0),
+        x1: Math.min(codeblock.tbx1_, regionInSubband.x1),
+        y1: Math.min(codeblock.tby1_, regionInSubband.y1)
+      };
+      if (regionInCodeblock.x0 >= regionInCodeblock.x1 ||
+          regionInCodeblock.y0 >= regionInCodeblock.y1) {
         continue;
       }
 
@@ -1262,38 +1312,40 @@ var JpxImage = (function JpxImageClosure() {
         currentCodingpassType = (currentCodingpassType + 1) % 3;
       }
 
-      var offset = (codeblock.tbx0_ - x0) + (codeblock.tby0_ - y0) * width;
       var sign = bitModel.coefficentsSign;
       var magnitude = bitModel.coefficentsMagnitude;
       var bitsDecoded = bitModel.bitsDecoded;
       var magnitudeCorrection = reversible ? 0 : 0.5;
       var k, n, nb;
-      position = 0;
+      var regionInCodeblockWidth = regionInCodeblock.x1 - regionInCodeblock.x0;
       // Do the interleaving of Section F.3.3 here, so we do not need
       // to copy later. LL level is not interleaved, just copied.
-      var interleave = (subband.type !== 'LL');
-      for (j = 0; j < blockHeight; j++) {
-        var row = (offset / width) | 0; // row in the non-interleaved subband
-        var levelOffset = 2 * row * (levelWidth - width) + right + bottom;
-        for (k = 0; k < blockWidth; k++) {
-          n = magnitude[position];
+      for (var row = regionInCodeblock.y0; row < regionInCodeblock.y1; ++row) {
+        var codeblockOffset =
+          (regionInCodeblock.x0 - codeblock.tbx0_) +
+          (row - codeblock.tby0_) * blockWidth;
+        var targetOffset =
+          (regionInCodeblock.x0 - regionInSubband.x0) * targetArrayStep +
+          (row - regionInSubband.y0) * targetArrayWidth * targetArrayStep +
+          right + bottom;
+          
+        for (k = regionInCodeblock.x0; k < regionInCodeblock.x1; k++) {
+          n = magnitude[codeblockOffset];
           if (n !== 0) {
             n = (n + magnitudeCorrection) * delta;
-            if (sign[position] !== 0) {
+            if (sign[codeblockOffset] !== 0) {
               n = -n;
             }
-            nb = bitsDecoded[position];
-            var pos = interleave ? (levelOffset + (offset << 1)) : offset;
+            nb = bitsDecoded[codeblockOffset];
             if (reversible && (nb >= mb)) {
-              coefficients[pos] = n;
+              coefficients[targetOffset] = n;
             } else {
-              coefficients[pos] = n * (1 << (mb - nb));
+              coefficients[targetOffset] = n * (1 << (mb - nb));
             }
           }
-          offset++;
-          position++;
+          targetOffset += targetArrayStep;
+          ++codeblockOffset;
         }
-        offset += width - blockWidth;
       }
     }
   }
@@ -1308,6 +1360,17 @@ var JpxImage = (function JpxImageClosure() {
     var guardBits = quantizationParameters.guardBits;
     var segmentationSymbolUsed = codingStyleParameters.segmentationSymbolUsed;
     var precision = context.components[c].precision;
+    var relativeRegionInTile;
+    if (context.regionToParse !== undefined) {
+      var x1 = Math.min(component.tcx1, context.regionToParse.right);
+      var y1 = Math.min(component.tcy1, context.regionToParse.bottom);
+      relativeRegionInTile = {
+        x0: Math.max(0, context.regionToParse.left - component.tcx0),
+        y0: Math.max(0, context.regionToParse.top - component.tcy0),
+        x1: x1 - component.tcx0,
+        y1: y1 - component.tcy0
+      };
+    }
 
     var reversible = codingStyleParameters.reversibleTransformation;
     var transform = (reversible ? new ReversibleTransform() :
@@ -1320,8 +1383,46 @@ var JpxImage = (function JpxImageClosure() {
 
       var width = resolution.trx1 - resolution.trx0;
       var height = resolution.try1 - resolution.try0;
+      
+      var regionInLevel, arrayWidth, arrayHeight;
+      if (relativeRegionInTile === undefined) {
+        arrayWidth = width;
+        arrayHeight = height;
+        regionInLevel = {
+          x0: resolution.trx0,
+          y0: resolution.try0,
+          x1: resolution.trx1,
+          y1: resolution.try1
+        };
+      } else {
+        var scale = 1 << (decompositionLevelsCount - i);
+        var redundantCoeffs = 4;
+        regionInLevel = {
+          x0: Math.ceil(relativeRegionInTile.x0 / scale) - redundantCoeffs,
+          y0: Math.ceil(relativeRegionInTile.y0 / scale) - redundantCoeffs,
+          x1: Math.ceil(relativeRegionInTile.x1 / scale) + redundantCoeffs,
+          y1: Math.ceil(relativeRegionInTile.y1 / scale) + redundantCoeffs
+        };
+        regionInLevel.x0 = 2 * Math.floor(regionInLevel.x0 / 2) +
+          resolution.trx0;
+        regionInLevel.y0 = 2 * Math.floor(regionInLevel.y0 / 2) +
+          resolution.try0;
+        regionInLevel.x1 = 2 * Math.floor(regionInLevel.x1 / 2) +
+          resolution.trx0;
+        regionInLevel.y1 = 2 * Math.floor(regionInLevel.y1 / 2) +
+          resolution.try0;
+        
+        regionInLevel.x0 = Math.max(regionInLevel.x0, resolution.trx0);
+        regionInLevel.y0 = Math.max(regionInLevel.y0, resolution.try0);
+        regionInLevel.x1 = Math.min(regionInLevel.x1, resolution.trx1);
+        regionInLevel.y1 = Math.min(regionInLevel.y1, resolution.try1);
+        
+        arrayWidth = regionInLevel.x1 - regionInLevel.x0;
+        arrayHeight = regionInLevel.y1 - regionInLevel.y0;
+      }
+      
       // Allocate space for the whole sublevel.
-      var coefficients = new Float32Array(width * height);
+      var coefficients = new Float32Array(arrayWidth * arrayHeight);
 
       for (var j = 0, jj = resolution.subbands.length; j < jj; j++) {
         var mu, epsilon;
@@ -1348,24 +1449,80 @@ var JpxImage = (function JpxImageClosure() {
         // copyCoefficients will consecutively fill in the values that belong
         // to the interleaved positions of the HL, LH, and HH coefficients.
         // The LL coefficients will then be interleaved in Transform.iterate().
-        copyCoefficients(coefficients, width, height, subband, delta, mb,
-                         reversible, segmentationSymbolUsed);
+        copyCoefficients(coefficients, arrayWidth, arrayHeight, subband, delta,
+                         mb, reversible, segmentationSymbolUsed,
+                         regionInLevel);
       }
+      
+      var relativeRegionInLevel = {
+        x0: regionInLevel.x0 - resolution.trx0,
+        y0: regionInLevel.y0 - resolution.try0,
+        x1: regionInLevel.x1 - resolution.trx0,
+        y1: regionInLevel.y1 - resolution.try0
+      };
       subbandCoefficients.push({
-        width: width,
-        height: height,
-        items: coefficients
+        items: coefficients,
+        relativeRegionInLevel: relativeRegionInLevel
       });
     }
 
     var result = transform.calculate(subbandCoefficients,
                                      component.tcx0, component.tcy0);
+    var transformedRegion = result.relativeRegionInLevel;
+    var transformedWidth = transformedRegion.x1 - transformedRegion.x0;
+    
+    var needCropTile = false;
+    if (context.regionToParse !== undefined) {
+      needCropTile =
+        relativeRegionInTile.x0 !== transformedRegion.x0 ||
+        relativeRegionInTile.y0 !== transformedRegion.y0 ||
+        relativeRegionInTile.x1 !== transformedRegion.x1 ||
+        relativeRegionInTile.y1 !== transformedRegion.y1;
+    }
+    if (!needCropTile) {
+      var transformedHeight = transformedRegion.y1 - transformedRegion.y0;
+      return {
+        left: component.tcx0,
+        top: component.tcy0,
+        width: transformedWidth,
+        height: transformedHeight,
+        items: result.items
+      };
+    }
+    
+    // Crop the 4 redundant pixels used for the DWT
+    
+    var width = relativeRegionInTile.x1 - relativeRegionInTile.x0;
+    var height = relativeRegionInTile.y1 - relativeRegionInTile.y0;
+    
+    var itemsWithRedundantPixels = result.items;
+    var items = new Float32Array(width * height);
+    
+    var redundantRowsTop =
+      relativeRegionInTile.y0 - transformedRegion.y0;
+    var redundantColumnsLeft =
+      relativeRegionInTile.x0 - transformedRegion.x0;
+      
+    var targetOffset = 0;
+    var sourceOffset =
+      redundantColumnsLeft + transformedWidth * redundantRowsTop;
+    for (var i = 0; i < height; ++i) {
+      var sourceEnd = sourceOffset + width;
+      
+      items.set(
+        itemsWithRedundantPixels.subarray(sourceOffset, sourceEnd),
+        targetOffset);
+      
+      sourceOffset += transformedWidth;
+      targetOffset += width;
+    }
+    
     return {
-      left: component.tcx0,
-      top: component.tcy0,
-      width: result.width,
-      height: result.height,
-      items: result.items
+      left: component.tcx0 + relativeRegionInTile.x0,
+      top: component.tcy0 + relativeRegionInTile.y0,
+      width: width,
+      height: height,
+      items: items
     };
   }
   function transformComponents(context) {
@@ -1375,6 +1532,16 @@ var JpxImage = (function JpxImageClosure() {
     var resultImages = [];
     for (var i = 0, ii = context.tiles.length; i < ii; i++) {
       var tile = context.tiles[i];
+      
+      if (context.regionToParse !== undefined) {
+        if (context.regionToParse.left >= tile.tx1 ||
+            context.regionToParse.top >= tile.ty1 ||
+            context.regionToParse.right <= tile.tx0 ||
+            context.regionToParse.bottom <= tile.ty0) {
+          continue;
+        }
+      }
+      
       var transformedTiles = [];
       var c;
       for (c = 0; c < componentsCount; c++) {
@@ -1993,16 +2160,33 @@ var JpxImage = (function JpxImageClosure() {
     };
     Transform.prototype.iterate = function Transform_iterate(ll, hl_lh_hh,
                                                              u0, v0) {
-      var llWidth = ll.width, llHeight = ll.height, llItems = ll.items;
-      var width = hl_lh_hh.width;
-      var height = hl_lh_hh.height;
+      var levelRegion = hl_lh_hh.relativeRegionInLevel;
+      if (ll.relativeRegionInLevel.x0 * 2 > levelRegion.x0 ||
+          ll.relativeRegionInLevel.y0 * 2 > levelRegion.y0 ||
+          ll.relativeRegionInLevel.x1 * 2 < levelRegion.x1 ||
+          ll.relativeRegionInLevel.y1 * 2 < levelRegion.y1) {
+        throw new Error('JPX Error: region in LL is smaller than region in ' +
+          'higher resolution level');
+      }
+      if (levelRegion.x0 % 2 !== 0 || levelRegion.y0 % 2 !== 0) {
+        throw new Error('JPX Error: region in HL/LH/HH subbands begins in ' +
+          'odd coefficients');
+      }
+      var llItems = ll.items;
+      var width = levelRegion.x1 - levelRegion.x0;
+      var height = levelRegion.y1 - levelRegion.y0;
+      var llWidth = ll.relativeRegionInLevel.x1 - ll.relativeRegionInLevel.x0;
+      var llOffsetX = levelRegion.x0 / 2 - ll.relativeRegionInLevel.x0;
+      var llOffsetY = levelRegion.y0 / 2 - ll.relativeRegionInLevel.y0;
+      var llOffset = llOffsetX + llOffsetY * llWidth;
       var items = hl_lh_hh.items;
       var i, j, k, l, u, v;
 
       // Interleave LL according to Section F.3.3
-      for (k = 0, i = 0; i < llHeight; i++) {
-        l = i * 2 * width;
-        for (j = 0; j < llWidth; j++, k++, l += 2) {
+      for (i = 0; i < height; i += 2) {
+        l = i * width;
+        k = llOffset + (llWidth * i / 2);
+        for (j = 0; j < width; j += 2, k++, l += 2) {
           items[l] = llItems[k];
         }
       }
@@ -2086,8 +2270,7 @@ var JpxImage = (function JpxImageClosure() {
       }
 
       return {
-        width: width,
-        height: height,
+        relativeRegionInLevel: levelRegion,
         items: items
       };
     };
