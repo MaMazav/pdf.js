@@ -141,19 +141,14 @@ var JpxImage = (function JpxImageClosure() {
       throw new Error('JPX Error: No size marker found in JPX stream');
     },
     parseCodestream: function JpxImage_parseCodestream(
-      data, start, end, regionToParse) {
+      data, start, end, options) {
       var context = {};
-      
-      if (regionToParse !== undefined) {
-        if (regionToParse.left === undefined ||
-            regionToParse.top === undefined ||
-            regionToParse.right === undefined ||
-            regionToParse.bottom === undefined) {
-          throw new Error('JPX Error: Either left, top, right or ' +
-            'bottom are undefined in regionToParse');
-        }
-        
-        context.regionToParse = regionToParse;
+      options = options || {};
+      var isOnlyParseHeaders = !!options.isOnlyParseHeaders;
+      var regionToParse = options.regionToParse;
+      if (regionToParse !== undefined && isOnlyParseHeaders) {
+        throw 'JPX Error: options.regionToParse is uneffective if ' +
+          'options.isOnlyParseHeaders = true';
       }
       
       try {
@@ -216,6 +211,11 @@ var JpxImage = (function JpxImageClosure() {
               var Ltlm = readUint16(data, position); // Marker segment length
               // Skip tile length markers
               position += Ltlm;
+              break;
+            case 0xFF58: // Packet lengths, tile header (PLT): MAMAZAV
+              var Lplt = readUint16(data, position); // Marker segment length
+              // Skip tile length markers
+              position += Lplt;
               break;
             case 0xFF5C: // Quantization default (QCD)
               length = readUint16(data, position);
@@ -404,7 +404,10 @@ var JpxImage = (function JpxImageClosure() {
 
               // moving to the end of the data
               length = tile.dataEnd - position;
-              parseTilePackets(context, data, position, length);
+              if (!isOnlyParseHeaders) {
+                parseTilePackets(context, data, position, length);
+              }
+              
               break;
             case 0xFF64: // Comment (COM)
               length = readUint16(data, position);
@@ -426,10 +429,67 @@ var JpxImage = (function JpxImageClosure() {
           warn('Trying to recover from ' + e.message);
         }
       }
-      this.tiles = transformComponents(context);
+      if (!isOnlyParseHeaders) {
+        this.decode(context, options);
+      }
       this.width = context.SIZ.Xsiz - context.SIZ.XOsiz;
       this.height = context.SIZ.Ysiz - context.SIZ.YOsiz;
       this.componentsCount = context.SIZ.Csiz;
+      return context;
+    },
+    addPacketsData: function JpxImage_addPacketData(context, packetsData) {
+      for (var j = 0; j < packetsData.packetDataOffsets.length; ++j) {
+        var packetOffsets = packetsData.packetDataOffsets[j];
+        var tile = context.tiles[packetOffsets.tileIndex];
+        var component = tile.components[packetOffsets.c];
+        var resolution = component.resolutions[packetOffsets.r];
+        var p = packetOffsets.p;
+        var l = packetOffsets.l;
+        var packet = createPacket(resolution, p, l);
+        for (var i = 0; i < packetOffsets.codeblockOffsets.length; ++i) {
+          var codeblockOffsets = packetOffsets.codeblockOffsets[i];
+          var isNoData = codeblockOffsets.start === codeblockOffsets.end;
+          if (isNoData) {
+            continue;
+          }
+          var codeblock = packet.codeblocks[i];
+          if (codeblock['data'] === undefined) {
+            codeblock.data = [];
+          }
+          if (codeblockOffsets.zeroBitPlanes !== undefined) {
+            if (codeblock.zeroBitPlanes === undefined) {
+              codeblock.zeroBitPlanes = codeblockOffsets.zeroBitPlanes;
+            }
+            if (codeblock.zeroBitPlanes !== codeblockOffsets.zeroBitPlanes) {
+              throw 'JPX Error: Unmatched zero bit planes';
+            }
+          } else if (codeblock.zeroBitPlanes === undefined) {
+            throw 'JPX Error: zeroBitPlanes is unknown';
+          }
+          codeblock.included = true;
+          codeblock.data.push({
+            data: packetsData.data,
+            start: codeblockOffsets.start,
+            end: codeblockOffsets.end,
+            codingpasses: codeblockOffsets.codingpasses
+          });
+        }
+      }
+    },
+    decode: function JpxImage_decode(context, options) {
+      if (options !== undefined && options.regionToParse !== undefined) {
+        var region = options.regionToParse;
+        if (region.top === undefined ||
+            region.left === undefined ||
+            region.right === undefined ||
+            region.bottom === undefined) {
+          throw new Error('JPX Error: Either left, top, right or ' +
+            'bottom are undefined in regionToParse');
+        }
+        context.regionToParse = region;
+      }
+      this.tiles = transformComponents(context);
+      context.regionToParse = undefined;
     }
   };
   function calculateComponentDimensions(component, siz) {
@@ -2398,4 +2458,3 @@ var JpxImage = (function JpxImageClosure() {
 
   return JpxImage;
 })();
-
