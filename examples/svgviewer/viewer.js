@@ -1,10 +1,3 @@
-/* -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set shiftwidth=2 tabstop=2 autoindent cindent expandtab: */
-
-//
-// See README for overview
-//
-
 'use strict';
 
 // Parse query string to extract some parameters (it can fail for some input)
@@ -16,17 +9,14 @@ var queryParams = query ? JSON.parse('{' + query.split('&').map(function (a) {
 var url = queryParams.file || '../../test/pdfs/liveprogramming.pdf';
 var scale = +queryParams.scale || 1.5;
 
-//
-// Fetch the PDF document from the URL using promises
-//
-PDFJS.getDocument(url).then(function(pdf) {
+function renderDocument(pdf, svgLib) {
   var numPages = pdf.numPages;
   // Using promise to fetch the page
 
   // For testing only.
   var MAX_NUM_PAGES = 50;
   var ii = Math.min(MAX_NUM_PAGES, numPages);
-  
+
   var promise = Promise.resolve();
   for (var i = 1; i <= ii; i++) {
     var anchor = document.createElement('a');
@@ -47,7 +37,7 @@ PDFJS.getDocument(url).then(function(pdf) {
         anchor.appendChild(container);
 
         return page.getOperatorList().then(function (opList) {
-          var svgGfx = new PDFJS.SVGGraphics(page.commonObjs, page.objs);
+          var svgGfx = new svgLib.SVGGraphics(page.commonObjs, page.objs);
           return svgGfx.getSVG(opList, viewport).then(function (svg) {
             container.appendChild(svg);
           });
@@ -55,5 +45,21 @@ PDFJS.getDocument(url).then(function(pdf) {
       });
     }.bind(null, i, anchor));
   }
-});
+}
 
+// In production, the bundled pdf.js shall be used instead of RequireJS.
+require.config({paths: {'pdfjs': '../../src'}});
+require(['pdfjs/display/api', 'pdfjs/display/svg', 'pdfjs/display/global'],
+    function (api, svg, global) {
+  // In production, change this to point to the built `pdf.worker.js` file.
+  global.PDFJS.workerSrc = '../../src/worker_loader.js';
+
+  // In production, change this to point to where the cMaps are placed.
+  global.PDFJS.cMapUrl = '../../external/bcmaps/';
+  global.PDFJS.cMapPacked = true;
+
+  // Fetch the PDF document from the URL using promises.
+  api.getDocument(url).then(function (doc) {
+    renderDocument(doc, svg);
+  });
+});
