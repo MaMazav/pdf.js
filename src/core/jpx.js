@@ -1285,16 +1285,101 @@ var JpxImage = (function JpxImageClosure() {
     }
     return position;
   }
+  function copyCoefficientsOfCodeblock(coefficients, targetStartOffset,
+                                       targetStep, targetRowStep,
+                                       codeblock, regionInCodeblock, delta, mb,
+                                       reversible, segmentationSymbolUsed) {
+    var blockWidth = codeblock.tbx1_ - codeblock.tbx0_;
+    var blockHeight = codeblock.tby1_ - codeblock.tby0_;
+    var bitModel, currentCodingpassType;
+    bitModel = new BitModel(blockWidth, blockHeight, codeblock.subbandType,
+                            codeblock.zeroBitPlanes, mb);
+    currentCodingpassType = 2; // first bit plane starts from cleanup
+
+    // collect data
+    var data = codeblock.data, totalLength = 0, codingpasses = 0;
+    var j, jj, dataItem;
+    for (j = 0, jj = data.length; j < jj; j++) {
+      dataItem = data[j];
+      totalLength += dataItem.end - dataItem.start;
+      codingpasses += dataItem.codingpasses;
+    }
+    var encodedData = new Uint8Array(totalLength);
+    var position = 0;
+    for (j = 0, jj = data.length; j < jj; j++) {
+      dataItem = data[j];
+      var chunk = dataItem.data.subarray(dataItem.start, dataItem.end);
+      encodedData.set(chunk, position);
+      position += chunk.length;
+    }
+    // decoding the item
+    var decoder = new ArithmeticDecoder(encodedData, 0, totalLength);
+    bitModel.setDecoder(decoder);
+
+    for (j = 0; j < codingpasses; j++) {
+      switch (currentCodingpassType) {
+        case 0:
+          bitModel.runSignificancePropagationPass();
+          break;
+        case 1:
+          bitModel.runMagnitudeRefinementPass();
+          break;
+        case 2:
+          bitModel.runCleanupPass();
+          if (segmentationSymbolUsed) {
+            bitModel.checkSegmentationSymbol();
+          }
+          break;
+      }
+      currentCodingpassType = (currentCodingpassType + 1) % 3;
+    }
+
+    var sign = bitModel.coefficentsSign;
+    var magnitude = bitModel.coefficentsMagnitude;
+    var bitsDecoded = bitModel.bitsDecoded;
+    var magnitudeCorrection = reversible ? 0 : 0.5;
+    var k, n, nb;
+    var codeblockRowStart =
+      (regionInCodeblock.x0 - codeblock.tbx0_) +
+      (regionInCodeblock.y0 - codeblock.tby0_) * blockWidth;
+    var targetRowStart = targetStartOffset;
+    // Do the interleaving of Section F.3.3 here, so we do not need
+    // to copy later. LL level is not interleaved, just copied.
+    for (var row = regionInCodeblock.y0; row < regionInCodeblock.y1; ++row) {
+      var codeblockOffset = codeblockRowStart;
+      var targetOffset = targetRowStart;
+      codeblockRowStart += blockWidth;
+      targetRowStart += targetRowStep;
+      
+      for (k = regionInCodeblock.x0; k < regionInCodeblock.x1; k++) {
+        n = magnitude[codeblockOffset];
+        if (n !== 0) {
+          n = (n + magnitudeCorrection) * delta;
+          if (sign[codeblockOffset] !== 0) {
+            n = -n;
+          }
+          nb = bitsDecoded[codeblockOffset];
+          if (reversible && (nb >= mb)) {
+            coefficients[targetOffset] = n;
+          } else {
+            coefficients[targetOffset] = n * (1 << (mb - nb));
+          }
+        }
+        targetOffset += targetStep;
+        ++codeblockOffset;
+      }
+    }
+  }
   function copyCoefficients(coefficients, targetArrayWidth, targetArrayHeight,
-                            subband,delta, mb, reversible,
+                            subband, interleaveType, delta, mb, reversible,
                             segmentationSymbolUsed, regionInLevel) {
     var x0 = subband.tbx0;
     var y0 = subband.tby0;
     var codeblocks = subband.codeblocks;
-    var right = subband.type.charAt(0) === 'H' ? 1 : 0;
-    var bottom = subband.type.charAt(1) === 'H' ? targetArrayWidth : 0;
+    var right = interleaveType.charAt(0) === 'H' ? 1 : 0;
+    var bottom = interleaveType.charAt(1) === 'H' ? targetArrayWidth : 0;
     var resolution = subband.resolution;
-    var interleave = (subband.type !== 'LL');
+    var interleave = (interleaveType !== 'LL');
     var regionInSubband;
     if (!interleave) {
       regionInSubband = regionInLevel;
@@ -1306,112 +1391,44 @@ var JpxImage = (function JpxImageClosure() {
         y1: (regionInLevel.y1 - resolution.try0) / 2 + subband.tby0
       };
     }
-    var targetArrayStep = interleave ? 2 : 1;
+    var targetStep = interleave ? 2 : 1;
 
+    var regionInCodeblock = {
+      x0: 0,
+      y0: 0,
+      x1: 0,
+      y1: 0
+    };
+
+    var targetRowStep = targetArrayWidth * targetStep;
     for (var i = 0, ii = codeblocks.length; i < ii; ++i) {
       var codeblock = codeblocks[i];
-      var blockWidth = codeblock.tbx1_ - codeblock.tbx0_;
-      var blockHeight = codeblock.tby1_ - codeblock.tby0_;
-      if (blockWidth === 0 || blockHeight === 0) {
-        continue;
-      }
       if (codeblock['data'] === undefined) {
         continue;
       }
       
-      var regionInCodeblock = {
-        x0: Math.max(codeblock.tbx0_, regionInSubband.x0),
-        y0: Math.max(codeblock.tby0_, regionInSubband.y0),
-        x1: Math.min(codeblock.tbx1_, regionInSubband.x1),
-        y1: Math.min(codeblock.tby1_, regionInSubband.y1)
-      };
+      regionInCodeblock.x0 = Math.max(codeblock.tbx0_, regionInSubband.x0);
+      regionInCodeblock.y0 = Math.max(codeblock.tby0_, regionInSubband.y0);
+      regionInCodeblock.x1 = Math.min(codeblock.tbx1_, regionInSubband.x1);
+      regionInCodeblock.y1 = Math.min(codeblock.tby1_, regionInSubband.y1);
       if (regionInCodeblock.x0 >= regionInCodeblock.x1 ||
           regionInCodeblock.y0 >= regionInCodeblock.y1) {
         continue;
       }
-
-      var bitModel, currentCodingpassType;
-      bitModel = new BitModel(blockWidth, blockHeight, codeblock.subbandType,
-                              codeblock.zeroBitPlanes, mb);
-      currentCodingpassType = 2; // first bit plane starts from cleanup
-
-      // collect data
-      var data = codeblock.data, totalLength = 0, codingpasses = 0;
-      var j, jj, dataItem;
-      for (j = 0, jj = data.length; j < jj; j++) {
-        dataItem = data[j];
-        totalLength += dataItem.end - dataItem.start;
-        codingpasses += dataItem.codingpasses;
-      }
-      var encodedData = new Uint8Array(totalLength);
-      var position = 0;
-      for (j = 0, jj = data.length; j < jj; j++) {
-        dataItem = data[j];
-        var chunk = dataItem.data.subarray(dataItem.start, dataItem.end);
-        encodedData.set(chunk, position);
-        position += chunk.length;
-      }
-      // decoding the item
-      var decoder = new ArithmeticDecoder(encodedData, 0, totalLength);
-      bitModel.setDecoder(decoder);
-
-      for (j = 0; j < codingpasses; j++) {
-        switch (currentCodingpassType) {
-          case 0:
-            bitModel.runSignificancePropagationPass();
-            break;
-          case 1:
-            bitModel.runMagnitudeRefinementPass();
-            break;
-          case 2:
-            bitModel.runCleanupPass();
-            if (segmentationSymbolUsed) {
-              bitModel.checkSegmentationSymbol();
-            }
-            break;
-        }
-        currentCodingpassType = (currentCodingpassType + 1) % 3;
-      }
-
-      var sign = bitModel.coefficentsSign;
-      var magnitude = bitModel.coefficentsMagnitude;
-      var bitsDecoded = bitModel.bitsDecoded;
-      var magnitudeCorrection = reversible ? 0 : 0.5;
-      var k, n, nb;
-      var regionInCodeblockWidth = regionInCodeblock.x1 - regionInCodeblock.x0;
-      // Do the interleaving of Section F.3.3 here, so we do not need
-      // to copy later. LL level is not interleaved, just copied.
-      for (var row = regionInCodeblock.y0; row < regionInCodeblock.y1; ++row) {
-        var codeblockOffset =
-          (regionInCodeblock.x0 - codeblock.tbx0_) +
-          (row - codeblock.tby0_) * blockWidth;
-        var targetOffset =
-          (regionInCodeblock.x0 - regionInSubband.x0) * targetArrayStep +
-          (row - regionInSubband.y0) * targetArrayWidth * targetArrayStep +
-          right + bottom;
-          
-        for (k = regionInCodeblock.x0; k < regionInCodeblock.x1; k++) {
-          n = magnitude[codeblockOffset];
-          if (n !== 0) {
-            n = (n + magnitudeCorrection) * delta;
-            if (sign[codeblockOffset] !== 0) {
-              n = -n;
-            }
-            nb = bitsDecoded[codeblockOffset];
-            if (reversible && (nb >= mb)) {
-              coefficients[targetOffset] = n;
-            } else {
-              coefficients[targetOffset] = n * (1 << (mb - nb));
-            }
-          }
-          targetOffset += targetArrayStep;
-          ++codeblockOffset;
-        }
-      }
+      
+      var targetStartOffset =
+        (regionInCodeblock.x0 - regionInSubband.x0) * targetStep +
+        (regionInCodeblock.y0 - regionInSubband.y0) * targetRowStep +
+        right + bottom;
+      
+      copyCoefficientsOfCodeblock(coefficients, targetStartOffset,
+                                  targetStep, targetRowStep, codeblock,
+                                  regionInCodeblock, delta, mb, reversible,
+                                  segmentationSymbolUsed);
     }
   }
-  function transformTile(context, tile, c) {
-    var component = tile.components[c];
+  function getCoefficientsIn(context, component, c, relativeRegionInTile,
+                             level, subbandIndex) {
     var codingStyleParameters = component.codingStyleParameters;
     var quantizationParameters = component.quantizationParameters;
     var decompositionLevelsCount =
@@ -1421,25 +1438,23 @@ var JpxImage = (function JpxImageClosure() {
     var guardBits = quantizationParameters.guardBits;
     var segmentationSymbolUsed = codingStyleParameters.segmentationSymbolUsed;
     var precision = context.components[c].precision;
-    var relativeRegionInTile;
-    if (context.regionToParse !== undefined) {
-      var x1 = Math.min(component.tcx1, context.regionToParse.right);
-      var y1 = Math.min(component.tcy1, context.regionToParse.bottom);
-      relativeRegionInTile = {
-        x0: Math.max(0, context.regionToParse.left - component.tcx0),
-        y0: Math.max(0, context.regionToParse.top - component.tcy0),
-        x1: x1 - component.tcx0,
-        y1: y1 - component.tcy0
-      };
-    }
 
     var reversible = codingStyleParameters.reversibleTransformation;
-    var transform = (reversible ? new ReversibleTransform() :
-                                  new IrreversibleTransform());
+
+    var minLevel = level || 0;
+    var maxLevel = level === undefined ? decompositionLevelsCount : level;
+    var minSubband = subbandIndex || 0;
 
     var subbandCoefficients = [];
-    var b = 0;
-    for (var i = 0; i <= decompositionLevelsCount; i++) {
+    var b = (minLevel === 0 ? 0 : (minLevel * 3 - 2)) + minSubband;
+    var regionInLevel = {
+        x0: 0,
+        y0: 0,
+        x1: 0,
+        y1: 0
+    };
+    
+    for (var i = minLevel; i <= maxLevel; i++) {
       var resolution = component.resolutions[i];
 
       var width = resolution.trx1 - resolution.trx0;
@@ -1449,21 +1464,22 @@ var JpxImage = (function JpxImageClosure() {
       if (relativeRegionInTile === undefined) {
         arrayWidth = width;
         arrayHeight = height;
-        regionInLevel = {
-          x0: resolution.trx0,
-          y0: resolution.try0,
-          x1: resolution.trx1,
-          y1: resolution.try1
-        };
+        regionInLevel.x0 = resolution.trx0;
+        regionInLevel.y0 = resolution.try0;
+        regionInLevel.x1 = resolution.trx1;
+        regionInLevel.y1 = resolution.try1;
       } else {
         var scale = 1 << (decompositionLevelsCount - i);
         var redundantCoeffs = 4;
-        regionInLevel = {
-          x0: Math.ceil(relativeRegionInTile.x0 / scale) - redundantCoeffs,
-          y0: Math.ceil(relativeRegionInTile.y0 / scale) - redundantCoeffs,
-          x1: Math.ceil(relativeRegionInTile.x1 / scale) + redundantCoeffs,
-          y1: Math.ceil(relativeRegionInTile.y1 / scale) + redundantCoeffs
-        };
+        regionInLevel.x0 = Math.ceil(relativeRegionInTile.x0 / scale) -
+          redundantCoeffs;
+        regionInLevel.y0 = Math.ceil(relativeRegionInTile.y0 / scale) -
+          redundantCoeffs;
+        regionInLevel.x1 = Math.ceil(relativeRegionInTile.x1 / scale) +
+          redundantCoeffs;
+        regionInLevel.y1 = Math.ceil(relativeRegionInTile.y1 / scale) +
+          redundantCoeffs;
+        
         regionInLevel.x0 = 2 * Math.floor(regionInLevel.x0 / 2) +
           resolution.trx0;
         regionInLevel.y0 = 2 * Math.floor(regionInLevel.y0 / 2) +
@@ -1482,10 +1498,24 @@ var JpxImage = (function JpxImageClosure() {
         arrayHeight = regionInLevel.y1 - regionInLevel.y0;
       }
       
+      var maxSubband, interleaveType;
+      if (subbandIndex === undefined) {
+        maxSubband = resolution.subbands.length;
+      } else {
+        // Consider as single subband in level for index calculations
+        interleaveType = 'LL';
+        
+        maxSubband = subbandIndex + 1;
+        if (resolution.subbands.length == 3) {
+          arrayWidth /= 2;
+          arrayHeight /= 2;
+        }
+      }
+      
       // Allocate space for the whole sublevel.
       var coefficients = new Float32Array(arrayWidth * arrayHeight);
 
-      for (var j = 0, jj = resolution.subbands.length; j < jj; j++) {
+      for (var j = minSubband; j < maxSubband; j++) {
         var mu, epsilon;
         if (!scalarExpounded) {
           // formula E-5
@@ -1499,6 +1529,9 @@ var JpxImage = (function JpxImageClosure() {
 
         var subband = resolution.subbands[j];
         var gainLog2 = SubbandsGainLog2[subband.type];
+        if (subbandIndex === undefined) {
+          interleaveType = subband.type;
+        }
 
         // calculate quantization coefficient (Section E.1.1.1)
         var delta = (reversible ? 1 :
@@ -1510,9 +1543,9 @@ var JpxImage = (function JpxImageClosure() {
         // copyCoefficients will consecutively fill in the values that belong
         // to the interleaved positions of the HL, LH, and HH coefficients.
         // The LL coefficients will then be interleaved in Transform.iterate().
-        copyCoefficients(coefficients, arrayWidth, arrayHeight, subband, delta,
-                         mb, reversible, segmentationSymbolUsed,
-                         regionInLevel);
+        copyCoefficients(coefficients, arrayWidth, arrayHeight, subband,
+                         interleaveType, delta, mb, reversible,
+                         segmentationSymbolUsed, regionInLevel);
       }
       
       var relativeRegionInLevel = {
@@ -1528,7 +1561,29 @@ var JpxImage = (function JpxImageClosure() {
         relativeRegionInLevel: relativeRegionInLevel
       });
     }
+    return subbandCoefficients;
+  }
 
+  function transformTile(context, tile, c) {
+    var component = tile.components[c];
+    var codingStyleParameters = component.codingStyleParameters;
+    var relativeRegionInTile;
+    var reversible = codingStyleParameters.reversibleTransformation;
+    var transform = (reversible ? new ReversibleTransform() :
+                                  new IrreversibleTransform());
+    if (context.regionToParse !== undefined) {
+      var x1 = Math.min(component.tcx1, context.regionToParse.right);
+      var y1 = Math.min(component.tcy1, context.regionToParse.bottom);
+      relativeRegionInTile = {
+        x0: Math.max(0, context.regionToParse.left - component.tcx0),
+        y0: Math.max(0, context.regionToParse.top - component.tcy0),
+        x1: x1 - component.tcx0,
+        y1: y1 - component.tcy0
+      };
+    }
+    
+    var subbandCoefficients = getCoefficientsIn(context, component, c,
+                                                relativeRegionInTile);
     var result = transform.calculate(subbandCoefficients,
                                      component.tcx0, component.tcy0);
     var transformedRegion = result.relativeRegionInLevel;
