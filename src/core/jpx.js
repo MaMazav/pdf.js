@@ -446,15 +446,19 @@ var JpxImage = (function JpxImageClosure() {
         var component = tile.components[packetOffsets.c];
         var resolution = component.resolutions[packetOffsets.r];
         var p = packetOffsets.p;
-        var l = packetOffsets.l;
-        var packet = createPacket(resolution, p, l);
+        //var l = packetOffsets.l;
+        var codeblocks = getCodeblocksIn(resolution, p);
         for (var i = 0; i < packetOffsets.codeblockOffsets.length; ++i) {
           var codeblockOffsets = packetOffsets.codeblockOffsets[i];
+          var codeblock = codeblocks[i];
+          if (codeblockOffsets['decodedCoeffs']) {
+            codeblock.decodedCoeffs = codeblockOffsets.decodedCoeffs;
+            codeblock.included = true;
+          }
           var isNoData = codeblockOffsets.start === codeblockOffsets.end;
           if (isNoData) {
             continue;
           }
-          var codeblock = packet.codeblocks[i];
           if (codeblock['data'] === undefined) {
             codeblock.data = [];
           }
@@ -477,6 +481,49 @@ var JpxImage = (function JpxImageClosure() {
           });
         }
       }
+    },
+    decodeCodeblockCoefficients: function JpxImage_decodeCodeblockCoefficients(
+        context, tileIdx, componentIdx, resolutionIdx, precinctIdx,
+        codeblockIndex) {
+      var tile = context.tiles[tileIdx];
+      var component = tile.components[componentIdx];
+      var resolution = component.resolutions[resolutionidx];
+      var codeblock = getCodeblocksIn(resolution, precinctIdx, codeblockIdx);
+      var subband = null;
+      for (var r = 0; r < resolution.subbands; ++r) {
+        if (subband.type === codeblock.subbandType) {
+          subband = resolution.subbands[r];
+          break;
+        }
+      }
+      if (subband === null) {
+        throw new JpxError('Could not find subband ' + subbandType);
+      }
+      var arrayWidth = codeblock.tbx1_ - codeblock.tbx0_;
+      var arrayHeight = codeblock.tby1_ - codeblock.tby0_;
+      var coefficients = new Float32Array(arrayWidth * arrayHeight);
+      var targetStep = 1;
+      var targetRowStep = arrayWidth;
+      var interleaveOffset = 0;
+      var codingStyleParameters = component.codingStyleParameters;
+      var quantizationParameters = component.quantizationParameters;
+      var spqcds = quantizationParameters.SPqcds;
+      var scalarExpounded = quantizationParameters.scalarExpounded;
+      var guardBits = quantizationParameters.guardBits;
+      var segmentationSymbolUsed = codingStyleParameters.segmentationSymbolUsed;
+      var precision = component.precision;
+      var reversible = codingStyleParameters.reversibleTransformation;
+      var regionInSubband = {
+        x0: codeblock.tbx0_,
+        x1: codeblock.tbx1_,
+        y0: codeblock.tby0_,
+        y1: codeblock.tby1_,
+      };
+      copyCoefficients(coefficients, targetStep, targetRowStep,
+                       interleaveOffset, subband, [codeblock], spqcds,
+                       scalarExpounded, precision, guardBits, reversible,
+                       segmentationSymbolUsed, regionInSubband);
+      return coefficients;
     },
     decode: function JpxImage_decode(context, options) {
       if (options !== undefined && options.regionToParse !== undefined) {
@@ -677,8 +724,11 @@ var JpxImage = (function JpxImageClosure() {
     subband.codeblocks = codeblocks;
     subband.precincts = precincts;
   }
-  function createPacket(resolution, precinctNumber, layerNumber) {
-    var precinctCodeblocks = [];
+  function getCodeblocksIn(resolution, precinctNumber, codeblockIndex) {
+    var precinctCodeblocks;
+    if (codeblockIndex === undefined) {
+      precinctCodeblocks = [];
+    }
     // Section B.10.8 Order of info in packet
     var subbands = resolution.subbands;
     // sub-bands already ordered in 'LL', 'HL', 'LH', and 'HH' sequence
@@ -690,12 +740,23 @@ var JpxImage = (function JpxImageClosure() {
         if (codeblock.precinctNumber !== precinctNumber) {
           continue;
         }
-        precinctCodeblocks.push(codeblock);
+        if (codeblockIndex === undefined) {
+          precinctCodeblocks.push(codeblock);
+        } else if ((codeblockIndex--) === 0) {
+          return codeblock;
+        }
       }
     }
+    if (codeblockIndex !== undefined) {
+      throw new JpxError('CodeblockIndex is ' + codeblockIndex +
+                         ' blocks above maximum');
+    }
+    return precinctCodeblocks;
+  }
+  function createPacket(resolution, precinctNumber, layerNumber) {
     return {
       layerNumber,
-      codeblocks: precinctCodeblocks,
+      codeblocks: getCodeblocksIn(resolution, precinctNumber),
     };
   }
   function LayerResolutionComponentPositionIterator(context) {
@@ -1015,6 +1076,7 @@ var JpxImage = (function JpxImageClosure() {
       // Section B.5 Resolution levels and sub-bands
       var resolutions = [];
       var subbands = [];
+      var indexInTileComponent = 0;
       for (var r = 0; r <= decompositionLevelsCount; r++) {
         var blocksDimensions = getBlocksDimensions(context, component, r);
         var resolution = {};
@@ -1037,6 +1099,7 @@ var JpxImage = (function JpxImageClosure() {
           subband.tbx1 = Math.ceil(component.tcx1 / scale);
           subband.tby1 = Math.ceil(component.tcy1 / scale);
           subband.resolution = resolution;
+          subband.indexInTileComponent = indexInTileComponent++;
           buildCodeblocks(context, subband, blocksDimensions);
           subbands.push(subband);
           resolution.subbands = [subband];
@@ -1051,6 +1114,7 @@ var JpxImage = (function JpxImageClosure() {
           subband.tbx1 = Math.ceil(component.tcx1 / bscale - 0.5);
           subband.tby1 = Math.ceil(component.tcy1 / bscale);
           subband.resolution = resolution;
+          subband.indexInTileComponent = indexInTileComponent++;
           buildCodeblocks(context, subband, blocksDimensions);
           subbands.push(subband);
           resolutionSubbands.push(subband);
@@ -1062,6 +1126,7 @@ var JpxImage = (function JpxImageClosure() {
           subband.tbx1 = Math.ceil(component.tcx1 / bscale);
           subband.tby1 = Math.ceil(component.tcy1 / bscale - 0.5);
           subband.resolution = resolution;
+          subband.indexInTileComponent = indexInTileComponent++;
           buildCodeblocks(context, subband, blocksDimensions);
           subbands.push(subband);
           resolutionSubbands.push(subband);
@@ -1073,6 +1138,7 @@ var JpxImage = (function JpxImageClosure() {
           subband.tbx1 = Math.ceil(component.tcx1 / bscale - 0.5);
           subband.tby1 = Math.ceil(component.tcy1 / bscale - 0.5);
           subband.resolution = resolution;
+          subband.indexInTileComponent = indexInTileComponent++;
           buildCodeblocks(context, subband, blocksDimensions);
           subbands.push(subband);
           resolutionSubbands.push(subband);
@@ -1285,10 +1351,7 @@ var JpxImage = (function JpxImageClosure() {
     }
     return position;
   }
-  function copyCoefficientsOfCodeblock(coefficients, targetStartOffset,
-                                       targetStep, targetRowStep,
-                                       codeblock, regionInCodeblock, delta, mb,
-                                       reversible, segmentationSymbolUsed) {
+  function getBitModelOfCodeblock(codeblock, mb, segmentationSymbolUsed) {
     var blockWidth = codeblock.tbx1_ - codeblock.tbx0_;
     var blockHeight = codeblock.tby1_ - codeblock.tby0_;
     var bitModel, currentCodingpassType;
@@ -1333,11 +1396,23 @@ var JpxImage = (function JpxImageClosure() {
       }
       currentCodingpassType = (currentCodingpassType + 1) % 3;
     }
-
-    var sign = bitModel.coefficentsSign;
-    var magnitude = bitModel.coefficentsMagnitude;
-    var bitsDecoded = bitModel.bitsDecoded;
-    var magnitudeCorrection = reversible ? 0 : 0.5;
+    return bitModel;
+  }
+  function copyCoefficientsOfCodeblock(coefficients, targetStartOffset,
+                                       targetStep, targetRowStep,
+                                       codeblock, regionInCodeblock, delta, mb,
+                                       reversible, segmentationSymbolUsed) {
+    var blockWidth = codeblock.tbx1_ - codeblock.tbx0_;
+    var blockHeight = codeblock.tby1_ - codeblock.tby0_;
+    var sign, magnitude = {}, bitsDecoded, magnitudeCorrection;
+    if (!codeblock.decodedCoeffs) {
+      var bitModel = getBitModelOfCodeblock(codeblock, mb,
+                                            segmentationSymbolUsed);
+      sign = bitModel.coefficentsSign;
+      magnitude = bitModel.coefficentsMagnitude;
+      bitsDecoded = bitModel.bitsDecoded;
+      magnitudeCorrection = reversible ? 0 : 0.5;
+    }
     var k, n, nb;
     var codeblockRowStart =
       (regionInCodeblock.x0 - codeblock.tbx0_) +
@@ -1353,7 +1428,9 @@ var JpxImage = (function JpxImageClosure() {
       
       for (k = regionInCodeblock.x0; k < regionInCodeblock.x1; k++) {
         n = magnitude[codeblockOffset];
-        if (n !== 0) {
+        if (codeblock.decodedCoeffs) {
+         coefficients[targetOffset] = codeblock.decodedCoeffs[codeblockOffset];
+        } else if (n !== 0) {
           n = (n + magnitudeCorrection) * delta;
           if (sign[codeblockOffset] !== 0) {
             n = -n;
@@ -1370,28 +1447,13 @@ var JpxImage = (function JpxImageClosure() {
       }
     }
   }
-  function copyCoefficients(coefficients, targetArrayWidth, targetArrayHeight,
-                            subband, interleaveType, delta, mb, reversible,
-                            segmentationSymbolUsed, regionInLevel) {
+  function copyCoefficients(coefficients, targetStep, targetRowStep,
+                            interleaveOffset, subband, codeblocks, spqcds,
+                            scalarExpounded, precision, guardBits, reversible,
+                            segmentationSymbolUsed, regionInSubband) {
     var x0 = subband.tbx0;
     var y0 = subband.tby0;
-    var codeblocks = subband.codeblocks;
-    var right = interleaveType.charAt(0) === 'H' ? 1 : 0;
-    var bottom = interleaveType.charAt(1) === 'H' ? targetArrayWidth : 0;
     var resolution = subband.resolution;
-    var interleave = (interleaveType !== 'LL');
-    var regionInSubband;
-    if (!interleave) {
-      regionInSubband = regionInLevel;
-    } else {
-      regionInSubband = {
-        x0: (regionInLevel.x0 - resolution.trx0) / 2 + subband.tbx0,
-        y0: (regionInLevel.y0 - resolution.try0) / 2 + subband.tby0,
-        x1: (regionInLevel.x1 - resolution.trx0) / 2 + subband.tbx0,
-        y1: (regionInLevel.y1 - resolution.try0) / 2 + subband.tby0
-      };
-    }
-    var targetStep = interleave ? 2 : 1;
 
     var regionInCodeblock = {
       x0: 0,
@@ -1400,7 +1462,24 @@ var JpxImage = (function JpxImageClosure() {
       y1: 0
     };
 
-    var targetRowStep = targetArrayWidth * targetStep;
+    var mu, epsilon;
+    if (!scalarExpounded) {
+      // formula E-5
+      mu = spqcds[0].mu;
+      var r = subband.resolution.resLevel;
+      epsilon = spqcds[0].epsilon + (r > 0 ? 1 - r : 0);
+    } else {
+      mu = spqcds[subband.indexInTileComponent].mu;
+      epsilon = spqcds[subband.indexInTileComponent].epsilon;
+    }
+
+    var gainLog2 = SubbandsGainLog2[subband.type];
+
+    // calculate quantization coefficient (Section E.1.1.1)
+    var delta = (reversible ? 1 :
+      Math.pow(2, precision + gainLog2 - epsilon) * (1 + mu / 2048));
+    var mb = (guardBits + epsilon - 1);
+    
     for (var i = 0, ii = codeblocks.length; i < ii; ++i) {
       var codeblock = codeblocks[i];
       if (codeblock['data'] === undefined) {
@@ -1419,7 +1498,7 @@ var JpxImage = (function JpxImageClosure() {
       var targetStartOffset =
         (regionInCodeblock.x0 - regionInSubband.x0) * targetStep +
         (regionInCodeblock.y0 - regionInSubband.y0) * targetRowStep +
-        right + bottom;
+        interleaveOffset;
       
       copyCoefficientsOfCodeblock(coefficients, targetStartOffset,
                                   targetStep, targetRowStep, codeblock,
@@ -1428,7 +1507,7 @@ var JpxImage = (function JpxImageClosure() {
     }
   }
   function getCoefficientsIn(context, component, c, relativeRegionInTile,
-                             level, subbandIndex) {
+                             level) {
     var codingStyleParameters = component.codingStyleParameters;
     var quantizationParameters = component.quantizationParameters;
     var decompositionLevelsCount =
@@ -1443,16 +1522,10 @@ var JpxImage = (function JpxImageClosure() {
 
     var minLevel = level || 0;
     var maxLevel = level === undefined ? decompositionLevelsCount : level;
-    var minSubband = subbandIndex || 0;
 
     var subbandCoefficients = [];
-    var b = (minLevel === 0 ? 0 : (minLevel * 3 - 2)) + minSubband;
-    var regionInLevel = {
-        x0: 0,
-        y0: 0,
-        x1: 0,
-        y1: 0
-    };
+    var regionInLevel = { x0: 0, y0: 0, x1: 0, y1: 0 };
+    var region = { x0: 0, y0: 0, x1: 0, y1: 0 };
     
     for (var i = minLevel; i <= maxLevel; i++) {
       var resolution = component.resolutions[i];
@@ -1498,54 +1571,37 @@ var JpxImage = (function JpxImageClosure() {
         arrayHeight = regionInLevel.y1 - regionInLevel.y0;
       }
       
-      var maxSubband, interleaveType;
-      if (subbandIndex === undefined) {
-        maxSubband = resolution.subbands.length;
-      } else {
-        // Consider as single subband in level for index calculations
-        interleaveType = 'LL';
-        
-        maxSubband = subbandIndex + 1;
-        if (resolution.subbands.length == 3) {
-          arrayWidth /= 2;
-          arrayHeight /= 2;
-        }
-      }
-      
       // Allocate space for the whole sublevel.
       var coefficients = new Float32Array(arrayWidth * arrayHeight);
 
-      for (var j = minSubband; j < maxSubband; j++) {
-        var mu, epsilon;
-        if (!scalarExpounded) {
-          // formula E-5
-          mu = spqcds[0].mu;
-          epsilon = spqcds[0].epsilon + (i > 0 ? 1 - i : 0);
-        } else {
-          mu = spqcds[b].mu;
-          epsilon = spqcds[b].epsilon;
-          b++;
-        }
-
+      for (var j = 0, jj = resolution.subbands.length; j < jj; j++) {
         var subband = resolution.subbands[j];
-        var gainLog2 = SubbandsGainLog2[subband.type];
-        if (subbandIndex === undefined) {
-          interleaveType = subband.type;
+        var right = subband.type.charAt(0) === 'H' ? 1 : 0;
+        var bottom = subband.type.charAt(1) === 'H' ? arrayWidth : 0;
+        var interleaveOffset = right + bottom;
+        var interleave = subband.type !== 'LL';
+        var regionInSubband;
+        if (!interleave) {
+          regionInSubband = regionInLevel;
+        } else {
+          region.x0 = (regionInLevel.x0 - resolution.trx0) / 2 + subband.tbx0;
+          region.y0 = (regionInLevel.y0 - resolution.try0) / 2 + subband.tby0;
+          region.x1 = (regionInLevel.x1 - resolution.trx0) / 2 + subband.tbx0;
+          region.y1 = (regionInLevel.y1 - resolution.try0) / 2 + subband.tby0;
+          regionInSubband = region;
         }
-
-        // calculate quantization coefficient (Section E.1.1.1)
-        var delta = (reversible ? 1 :
-          Math.pow(2, precision + gainLog2 - epsilon) * (1 + mu / 2048));
-        var mb = (guardBits + epsilon - 1);
+        var targetStep = interleave ? 2 : 1;
+        var targetRowStep = arrayWidth * targetStep;
 
         // In the first resolution level, copyCoefficients will fill the
         // whole array with coefficients. In the succeeding passes,
         // copyCoefficients will consecutively fill in the values that belong
         // to the interleaved positions of the HL, LH, and HH coefficients.
         // The LL coefficients will then be interleaved in Transform.iterate().
-        copyCoefficients(coefficients, arrayWidth, arrayHeight, subband,
-                         interleaveType, delta, mb, reversible,
-                         segmentationSymbolUsed, regionInLevel);
+        copyCoefficients(coefficients, targetStep, targetRowStep,
+                         interleaveOffset, subband, subband.codeblocks, spqcds,
+                         scalarExpounded, precision, guardBits, reversible,
+                         segmentationSymbolUsed, regionInSubband);
       }
       
       var relativeRegionInLevel = {
