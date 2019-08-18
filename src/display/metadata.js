@@ -14,7 +14,7 @@
  */
 
 import { assert } from '../shared/util';
-import { SimpleXMLParser } from './dom_utils';
+import { SimpleXMLParser } from './xml_parser';
 
 class Metadata {
   constructor(data) {
@@ -23,17 +23,21 @@ class Metadata {
     // Ghostscript may produce invalid metadata, so try to repair that first.
     data = this._repair(data);
 
-    // Convert the string to a DOM `Document`.
+    // Convert the string to an XML document.
     let parser = new SimpleXMLParser();
-    data = parser.parseFromString(data);
+    const xmlDocument = parser.parseFromString(data);
 
     this._metadata = Object.create(null);
 
-    this._parse(data);
+    if (xmlDocument) {
+      this._parse(xmlDocument);
+    }
   }
 
   _repair(data) {
-    return data.replace(/>\\376\\377([^<]+)/g, function(all, codes) {
+    // Start by removing any "junk" before the first tag (see issue 10395).
+    return data.replace(/^([^<]+)/, '').replace(/>\\376\\377([^<]+)/g,
+        function(all, codes) {
       let bytes = codes.replace(/\\([0-3])([0-7])([0-7])/g,
           function(code, d1, d2, d3) {
         return String.fromCharCode(d1 * 64 + d2 * 8 + d3 * 1);
@@ -68,8 +72,8 @@ class Metadata {
     });
   }
 
-  _parse(domDocument) {
-    let rdf = domDocument.documentElement;
+  _parse(xmlDocument) {
+    let rdf = xmlDocument.documentElement;
 
     if (rdf.nodeName.toLowerCase() !== 'rdf:rdf') { // Wrapped in <xmpmeta>
       rdf = rdf.firstChild;
@@ -102,7 +106,8 @@ class Metadata {
   }
 
   get(name) {
-    return this._metadata[name] || null;
+    const data = this._metadata[name];
+    return (typeof data !== 'undefined' ? data : null);
   }
 
   getAll() {

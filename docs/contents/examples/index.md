@@ -5,22 +5,26 @@ template: layout.jade
 
 ## Hello World Walkthrough
 
-[Full source](https://github.com/mozilla/pdf.js/tree/master/examples/helloworld)
+[Full source](https://github.com/mozilla/pdf.js/blob/master/examples/learning/helloworld.html)
 
 PDF.js heavily relies on the use of [Promises](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/Promise). If promises are new to you, it's recommended you become familiar with them before continuing on.
+
+This tutorial shows how PDF.js can be used as a library in a web browser.
+[examples/](https://github.com/mozilla/pdf.js/tree/master/examples) provides more examples, including usage in Node.js (at [examples/node/](https://github.com/mozilla/pdf.js/tree/master/examples/node)).
 
 ### Document
 
 The object structure of PDF.js loosely follows the structure of an actual PDF. At the top level there is a document object. From the document, more information and individual pages can be fetched. To get the document:
 
 ```js
-PDFJS.getDocument('helloworld.pdf')
+pdfjsLib.getDocument('helloworld.pdf')
 ```
 
-Remember though that PDF.js uses promises, so the above will return a promise that is resolved with the document object.
+Remember though that PDF.js uses promises, and the above will return a `PDFDocumentLoadingTask` instance that has a `promise` property which is resolved with the document object.
 
 ```js
-PDFJS.getDocument('helloworld.pdf').then(function(pdf) {
+var loadingTask = pdfjsLib.getDocument('helloworld.pdf');
+loadingTask.promise.then(function(pdf) {
   // you can now use *pdf* here
 });
 ```
@@ -39,7 +43,7 @@ Each PDF page has its own viewport which defines the size in pixels(72DPI) and i
 
 ```js
 var scale = 1.5;
-var viewport = page.getViewport(scale);
+var viewport = page.getViewport({ scale: scale, });
 
 var canvas = document.getElementById('the-canvas');
 var context = canvas.getContext('2d');
@@ -57,9 +61,9 @@ Alternatively, if you want the canvas to render to a certain pixel size you coul
 
 ```js
 var desiredWidth = 100;
-var viewport = page.getViewport(1);
+var viewport = page.getViewport({ scale: 1, });
 var scale = desiredWidth / viewport.width;
-var scaledViewport = page.getViewport(scale);
+var scaledViewport = page.getViewport({ scale: scale, });
 ```
 
 ## Interactive examples

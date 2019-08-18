@@ -12,10 +12,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+/* eslint-disable no-unsanitized/method */
 
-import {
-  ImageKind, OPS, Util
-} from '../shared/util';
+import { assert, ImageKind, OPS } from '../shared/util';
 
 var QueueOptimizer = (function QueueOptimizerClosure() {
   function addState(parentState, pattern, checkFn, iterateFn, processFn) {
@@ -73,6 +72,7 @@ var QueueOptimizer = (function QueueOptimizerClosure() {
         case 3:
           return fnArray[i] === OPS.restore;
       }
+      throw new Error(`iterateInlineImageGroup - invalid pos: ${pos}`);
     },
     function foundInlineImageGroup(context, i) {
       var MIN_IMAGES_IN_INLINE_IMAGES_BLOCK = 10;
@@ -118,7 +118,7 @@ var QueueOptimizer = (function QueueOptimizerClosure() {
       }
       var imgWidth = Math.max(maxX, currentX) + IMAGE_PADDING;
       var imgHeight = currentY + maxLineHeight + IMAGE_PADDING;
-      var imgData = new Uint8Array(imgWidth * imgHeight * 4);
+      var imgData = new Uint8ClampedArray(imgWidth * imgHeight * 4);
       var imgRowSize = imgWidth << 2;
       for (q = 0; q < count; q++) {
         var data = argsArray[iFirstPIIXO + (q << 2)][0].data;
@@ -175,6 +175,7 @@ var QueueOptimizer = (function QueueOptimizerClosure() {
         case 3:
           return fnArray[i] === OPS.restore;
       }
+      throw new Error(`iterateImageMaskGroup - invalid pos: ${pos}`);
     },
     function foundImageMaskGroup(context, i) {
       var MIN_IMAGES_IN_MASKS_BLOCK = 10;
@@ -268,7 +269,7 @@ var QueueOptimizer = (function QueueOptimizerClosure() {
       return argsArray[iFirstTransform][1] === 0 &&
              argsArray[iFirstTransform][2] === 0;
     },
-    function (context, i) {
+    function iterateImageGroup(context, i) {
       var fnArray = context.fnArray, argsArray = context.argsArray;
       var iFirstSave = context.iCurr - 3;
       var pos = (i - iFirstSave) % 4;
@@ -302,6 +303,7 @@ var QueueOptimizer = (function QueueOptimizerClosure() {
         case 3:
           return fnArray[i] === OPS.restore;
       }
+      throw new Error(`iterateImageGroup - invalid pos: ${pos}`);
     },
     function (context, i) {
       var MIN_IMAGES_IN_BLOCK = 3;
@@ -348,7 +350,7 @@ var QueueOptimizer = (function QueueOptimizerClosure() {
   addState(InitialState,
     [OPS.beginText, OPS.setFont, OPS.setTextMatrix, OPS.showText, OPS.endText],
     null,
-    function (context, i) {
+    function iterateShowTextGroup(context, i) {
       var fnArray = context.fnArray, argsArray = context.argsArray;
       var iFirstSave = context.iCurr - 4;
       var pos = (i - iFirstSave) % 5;
@@ -374,6 +376,7 @@ var QueueOptimizer = (function QueueOptimizerClosure() {
         case 4:
           return fnArray[i] === OPS.endText;
       }
+      throw new Error(`iterateShowTextGroup - invalid pos: ${pos}`);
     },
     function (context, i) {
       var MIN_CHARS_IN_BLOCK = 3;
@@ -444,7 +447,7 @@ var QueueOptimizer = (function QueueOptimizerClosure() {
       let match = this.match;
       if (!state && !match && (i + 1 === ii) && !InitialState[fnArray[i]]) {
         // Micro-optimization for the common case: last item is not
-        // optimazable, just skipping it.
+        // optimizable, just skipping it.
         this.lastProcessed = ii;
         return;
       }
@@ -452,7 +455,7 @@ var QueueOptimizer = (function QueueOptimizerClosure() {
       const context = this.context;
       while (i < ii) {
         if (match) {
-          // Already find a block of potetially optimizable items, iterating...
+          // Already find a block of potentially optimizable items, iterating...
           const iterate = (0, match.iterateFn)(context, i);
           if (iterate) {
             i++;
@@ -467,7 +470,7 @@ var QueueOptimizer = (function QueueOptimizerClosure() {
             break;
           }
         }
-        // Find the potetially optimizable items.
+        // Find the potentially optimizable items.
         state = (state || InitialState)[fnArray[i]];
         if (!state || Array.isArray(state)) {
           i++;
@@ -527,6 +530,8 @@ var NullOptimizer = (function NullOptimizerClosure() {
     },
 
     flush() { },
+
+    reset() { },
   };
 
   return NullOptimizer;
@@ -536,29 +541,11 @@ var OperatorList = (function OperatorListClosure() {
   var CHUNK_SIZE = 1000;
   var CHUNK_SIZE_ABOUT = CHUNK_SIZE - 5; // close to chunk size
 
-  function getTransfers(queue) {
-    var transfers = [];
-    var fnArray = queue.fnArray, argsArray = queue.argsArray;
-    for (var i = 0, ii = queue.length; i < ii; i++) {
-      switch (fnArray[i]) {
-        case OPS.paintInlineImageXObject:
-        case OPS.paintInlineImageXObjectGroup:
-        case OPS.paintImageMaskXObject:
-          var arg = argsArray[i][0]; // first param in imgData
-          if (!arg.cached) {
-            transfers.push(arg.data.buffer);
-          }
-          break;
-      }
-    }
-    return transfers;
-  }
-
   function OperatorList(intent, messageHandler, pageIndex) {
     this.messageHandler = messageHandler;
     this.fnArray = [];
     this.argsArray = [];
-    if (messageHandler && this.intent !== 'oplist') {
+    if (messageHandler && intent !== 'oplist') {
       this.optimizer = new QueueOptimizer(this);
     } else {
       this.optimizer = new NullOptimizer(this);
@@ -612,7 +599,7 @@ var OperatorList = (function OperatorListClosure() {
     },
 
     addOpList(opList) {
-      Util.extendObj(this.dependencies, opList.dependencies);
+      Object.assign(this.dependencies, opList.dependencies);
       for (var i = 0, ii = opList.length; i < ii; i++) {
         this.addOp(opList.fnArray[i], opList.argsArray[i]);
       }
@@ -626,10 +613,33 @@ var OperatorList = (function OperatorListClosure() {
       };
     },
 
-    flush(lastChunk) {
+    get _transfers() {
+      const transfers = [];
+      const { fnArray, argsArray, length, } = this;
+      for (let i = 0; i < length; i++) {
+        switch (fnArray[i]) {
+          case OPS.paintInlineImageXObject:
+          case OPS.paintInlineImageXObjectGroup:
+          case OPS.paintImageMaskXObject:
+            const arg = argsArray[i][0]; // first param in imgData
+
+            if (typeof PDFJSDev === 'undefined' ||
+                PDFJSDev.test('!PRODUCTION || TESTING')) {
+              assert(arg.data instanceof Uint8ClampedArray,
+                     'OperatorList._transfers: Unsupported "arg.data" type.');
+            }
+            if (!arg.cached) {
+              transfers.push(arg.data.buffer);
+            }
+            break;
+        }
+      }
+      return transfers;
+    },
+
+    flush(lastChunk = false) {
       this.optimizer.flush();
-      var transfers = getTransfers(this);
-      var length = this.length;
+      const length = this.length;
       this._totalLength += length;
 
       this.messageHandler.send('RenderPageChunk', {
@@ -641,7 +651,8 @@ var OperatorList = (function OperatorListClosure() {
         },
         pageIndex: this.pageIndex,
         intent: this.intent,
-      }, transfers);
+      }, this._transfers);
+
       this.dependencies = Object.create(null);
       this.fnArray.length = 0;
       this.argsArray.length = 0;

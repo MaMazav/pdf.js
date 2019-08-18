@@ -15,7 +15,8 @@
 
 import { CSS_UNITS, NullL10n } from './ui_utils';
 import { PDFPrintServiceFactory, PDFViewerApplication } from './app';
-import { PDFJS } from 'pdfjs-lib';
+import { AppOptions } from './app_options';
+import { URL } from 'pdfjs-lib';
 
 let activeService = null;
 let overlayManager = null;
@@ -26,7 +27,7 @@ function renderPage(activeServiceOnEntry, pdfDocument, pageNumber, size) {
   let scratchCanvas = activeService.scratchCanvas;
 
   // The size of the canvas in pixels for printing.
-  const PRINT_RESOLUTION = 150;
+  const PRINT_RESOLUTION = AppOptions.get('printResolution') || 150;
   const PRINT_UNITS = PRINT_RESOLUTION / 72.0;
   scratchCanvas.width = Math.floor(size.width * PRINT_UNITS);
   scratchCanvas.height = Math.floor(size.height * PRINT_UNITS);
@@ -45,7 +46,7 @@ function renderPage(activeServiceOnEntry, pdfDocument, pageNumber, size) {
     let renderContext = {
       canvasContext: ctx,
       transform: [PRINT_UNITS, 0, 0, PRINT_UNITS, 0, 0],
-      viewport: pdfPage.getViewport(1, size.rotation),
+      viewport: pdfPage.getViewport({ scale: 1, rotation: size.rotation, }),
       intent: 'print',
     };
     return pdfPage.render(renderContext).promise;
@@ -62,6 +63,8 @@ function PDFPrintService(pdfDocument, pagesOverview, printContainer, l10n) {
   this.pagesOverview = pagesOverview;
   this.printContainer = printContainer;
   this.l10n = l10n || NullL10n;
+  this.disableCreateObjectURL =
+    pdfDocument.loadingParams['disableCreateObjectURL'];
   this.currentPage = -1;
   // The temporary canvas where renderPage paints one page at a time.
   this.scratchCanvas = document.createElement('canvas');
@@ -71,7 +74,7 @@ PDFPrintService.prototype = {
   layout() {
     this.throwIfInactive();
 
-    let body = document.querySelector('body');
+    const body = document.querySelector('body');
     body.setAttribute('data-pdfjsprinting', true);
 
     let hasEqualPageSizes = this.pagesOverview.every(function(size) {
@@ -111,8 +114,12 @@ PDFPrintService.prototype = {
       return;
     }
     this.printContainer.textContent = '';
-    if (this.pageStyleSheet && this.pageStyleSheet.parentNode) {
-      this.pageStyleSheet.parentNode.removeChild(this.pageStyleSheet);
+
+    const body = document.querySelector('body');
+    body.removeAttribute('data-pdfjsprinting');
+
+    if (this.pageStyleSheet) {
+      this.pageStyleSheet.remove();
       this.pageStyleSheet = null;
     }
     this.scratchCanvas.width = this.scratchCanvas.height = 0;
@@ -153,7 +160,7 @@ PDFPrintService.prototype = {
     img.style.height = printItem.height;
 
     let scratchCanvas = this.scratchCanvas;
-    if (('toBlob' in scratchCanvas) && !PDFJS.disableCreateObjectURL) {
+    if (('toBlob' in scratchCanvas) && !this.disableCreateObjectURL) {
       scratchCanvas.toBlob(function(blob) {
         img.src = URL.createObjectURL(blob);
       });
@@ -290,6 +297,7 @@ window.addEventListener('keydown', function(event) {
   }
 }, true);
 if (hasAttachEvent) {
+  // eslint-disable-next-line consistent-return
   document.attachEvent('onkeydown', function(event) {
     event = event || window.event;
     if (event.keyCode === /* P= */ 80 && event.ctrlKey) {
@@ -301,7 +309,7 @@ if (hasAttachEvent) {
 
 if ('onbeforeprint' in window) {
   // Do not propagate before/afterprint events when they are not triggered
-  // from within this polyfill. (FF/IE).
+  // from within this polyfill. (FF /IE / Chrome 63+).
   let stopPropagationIfNeeded = function(event) {
     if (event.detail !== 'custom' && event.stopImmediatePropagation) {
       event.stopImmediatePropagation();
